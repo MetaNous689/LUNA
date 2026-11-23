@@ -947,7 +947,7 @@ fn draw_panel(frame: &mut Frame<'_>, area: Rect, panel: Panel) {
         .filter(|row| matches!(row, Row::Graph { .. }))
         .count() as u16;
     let spare = (area.height - 2).saturating_sub(fixed);
-    let per_graph = if graphs == 0 { 0 } else { spare / graphs };
+    let per_graph = spare.checked_div(graphs).unwrap_or(0);
 
     let mut y = area.y + 1;
     let mut graph_index = 0u16;
