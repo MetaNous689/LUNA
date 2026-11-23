@@ -1,0 +1,530 @@
+#!/bin/sh
+set -eu
+
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+monitor="$bin_dir/../libexec/luna/luna-monitor"
+monitor_dir=$(dirname -- "$monitor")
+# Luna runs in its own private tmux server, separate from any tmux of yours.
+tmux_socket=${LUNA_TMUX_SOCKET:-luna}
+tmux_session=luna-monitor
+tailscale_https_ports="38444 443 10000 8443"
+pwa_local_port=4782
+pwa_relay_port=4783
+state_root=${XDG_STATE_HOME:-${HOME:?HOME must be set}/.local/state}
+pwa_relay_script="$monitor_dir/luna-pwa-relay.py"
+pwa_relay_unit=luna-pwa-relay.service
+
+# The isolated socket is independent of a tmux session that launched Luna.
+unset TMUX
+
+usage() {
+    cat <<'HELP'
+luna — lokaler Systemmonitor
+
+Aufruf:
+  luna       Monitor starten oder an die laufende Luna-Ansicht anhaengen
+  luna on    Monitorserver im Hintergrund starten
+  luna off   Luna-Monitorserver beenden
+  luna pwa on   PWA sicher über einen freien Tailscale-HTTPS-Port bereitstellen
+  luna pwa off  Nur die von Luna gesetzte Tailscale-Route entfernen
+  luna --help
+
+Alle Aufrufe verwenden dieselbe isolierte tmux-Sitzung. q oder Esc loest die
+Ansicht; luna off beendet den Monitorserver. r aktualisiert die Messwerte.
+Pfeil hoch/runter waehlt einen Server, x fragt nach dem Beenden.
+HELP
+}
+
+command_name=${1-}
+command_arg=${2-}
+
+case "$command_name" in
+    --help|-h|help)
+        usage
+        exit 0
+        ;;
+    on|off|"")
+        if [ "$#" -gt 1 ]; then
+            usage >&2
+            exit 64
+        fi
+        ;;
+    pwa)
+        if [ "$#" -ne 2 ] || { [ "$command_arg" != "on" ] && [ "$command_arg" != "off" ]; }; then
+            usage >&2
+            exit 64
+        fi
+        ;;
+    *)
+        usage >&2
+        exit 64
+        ;;
+esac
+
+if [ "$command_name" != "pwa" ] || [ "$command_arg" = "on" ]; then
+    if [ ! -x "$monitor" ]; then
+        echo "luna: Terminalmonitor nicht installiert; Installer im Projekt ausfuehren." >&2
+        exit 127
+    fi
+    if ! tmux_bin=$(command -v tmux); then
+        echo "luna: tmux fehlt; der gemeinsame Monitorserver benoetigt tmux." >&2
+        exit 127
+    fi
+fi
+
+if [ "$command_name" = "pwa" ]; then
+    if ! tailscale_bin=$(command -v tailscale); then
+        echo "luna: Tailscale ist nicht installiert oder nicht im PATH." >&2
+        exit 127
+    fi
+    if ! python_bin=$(command -v python3); then
+        echo "luna: python3 wird für die sichere Portprüfung benötigt." >&2
+        exit 127
+    fi
+    if ! systemctl_bin=$(command -v systemctl); then
+        echo "luna: systemd --user wird für den PWA-Relay benötigt." >&2
+        exit 127
+    fi
+fi
+
+pwa_relay_health_check() {
+    "$python_bin" - "$pwa_relay_port" "$pwa_local_port" <<'PY'
+import json
+import sys
+import time
+from urllib.request import Request, urlopen
+
+relay_port = int(sys.argv[1])
+local_port = int(sys.argv[2])
+request = Request(
+    f"http://127.0.0.1:{relay_port}/api/health",
+    headers={"Host": "luna-probe.ts.net:38444"},
+)
+for _ in range(20):
+    try:
+        with urlopen(request, timeout=0.5) as response:
+            health = json.load(response)
+            if response.status == 200 and health == {"ok": True, "port": local_port}:
+                raise SystemExit(0)
+    except Exception:
+        pass
+    time.sleep(0.25)
+raise SystemExit(1)
+PY
+}
+
+start_pwa_relay() {
+    [ -f "$pwa_relay_script" ] || {
+        echo "luna: Das Luna-PWA-Relay fehlt: $pwa_relay_script" >&2
+        return 1
+    }
+    relay_started_by_this_call=0
+    if ! "$systemctl_bin" --user is-active --quiet "$pwa_relay_unit"; then
+        if ! "$systemctl_bin" --user start "$pwa_relay_unit"; then
+            echo "luna: Der Luna-PWA-Relay konnte nicht gestartet werden." >&2
+            return 1
+        fi
+        relay_started_by_this_call=1
+    fi
+    if pwa_relay_health_check; then
+        return 0
+    fi
+    if [ "$relay_started_by_this_call" -eq 0 ]; then
+        if ! "$systemctl_bin" --user restart "$pwa_relay_unit"; then
+            echo "luna: Das Luna-PWA-Relay antwortet nicht und konnte nicht neu gestartet werden; keine Route wurde geändert." >&2
+            return 1
+        fi
+        if pwa_relay_health_check; then
+            return 0
+        fi
+        echo "luna: Das Luna-PWA-Relay antwortet auch nach einem Neustart nicht; keine Route wurde geändert." >&2
+        return 1
+    fi
+    "$systemctl_bin" --user stop "$pwa_relay_unit" >/dev/null 2>&1 || true
+    echo "luna: Das Luna-PWA-Relay antwortet nicht; keine Route wurde geändert." >&2
+    return 1
+}
+
+stop_pwa_relay() {
+    if ! "$systemctl_bin" --user is-active --quiet "$pwa_relay_unit"; then
+        return 0
+    fi
+    "$systemctl_bin" --user stop "$pwa_relay_unit"
+}
+
+tmux_command() {
+    "$tmux_bin" -f /dev/null -L "$tmux_socket" "$@"
+}
+
+session_exists() {
+    tmux_command has-session -t "$tmux_session" >/dev/null 2>&1
+}
+
+start_server() {
+    if ! session_exists; then
+        # Luna has a semantic palette, so keep the shell's NO_COLOR setting local to other tools.
+        if ! tmux_command new-session -d -s "$tmux_session" -c "$monitor_dir" 'exec env -u NO_COLOR ./luna-monitor' >/dev/null; then
+            if ! session_exists; then
+                echo "luna: Monitorserver konnte nicht gestartet werden." >&2
+                return 1
+            fi
+        fi
+    fi
+    tmux_command set-option -t "$tmux_session" status off
+    tmux_command bind-key -n q detach-client
+    tmux_command bind-key -n Escape detach-client
+}
+
+pwa_marker_path() {
+    printf '%s\n' "$state_root/luna/tailscale-serve-$1"
+}
+
+pwa_serve_state() (
+    https_port=$1
+    status_json=$("$tailscale_bin" serve status --json 2>/dev/null) || exit 2
+    printf '%s' "$status_json" | "$python_bin" -c '
+import json
+import sys
+from urllib.parse import urlsplit
+
+https_port = int(sys.argv[1])
+local_port = int(sys.argv[2])
+relay_port = int(sys.argv[3])
+local_ports = {relay_port} if https_port == 38444 else {local_port, relay_port}
+config = json.load(sys.stdin)
+routes = []
+
+def key_port(key, default_port=None):
+    if not isinstance(key, str):
+        return None
+    if key.isdecimal():
+        return int(key)
+    if key.startswith(":") and key[1:].isdecimal():
+        return int(key[1:])
+    if key.startswith(("http://", "https://")):
+        try:
+            parsed = urlsplit(key)
+            if parsed.port is not None:
+                return parsed.port
+            return 443 if parsed.scheme == "https" else 80
+        except ValueError:
+            return None
+    try:
+        parsed = urlsplit("//" + key)
+        return parsed.port if parsed.port is not None else default_port
+    except ValueError:
+        return None
+
+if not isinstance(config, dict):
+    raise SystemExit(2)
+web = config.get("Web")
+tcp = config.get("TCP")
+if not isinstance(web, dict) and not isinstance(tcp, dict):
+    raise SystemExit(2)
+
+def is_luna_route(value):
+    if isinstance(value, dict):
+        return any(is_luna_route(child) for child in value.values())
+    if isinstance(value, list):
+        return any(is_luna_route(child) for child in value)
+    if isinstance(value, str):
+        target = value.rstrip("/")
+        return any(
+            target in {
+                f"http://127.0.0.1:{port}",
+                f"http://localhost:{port}",
+                f"127.0.0.1:{port}",
+                f"localhost:{port}",
+            }
+            for port in local_ports
+        )
+    return False
+
+# Newer Tailscale versions key Web entries by hostname and keep HTTPS
+# listener ports separately under TCP. The Web handler identifies the target;
+# a TCP listener without a matching Web handler is merely occupied.
+if isinstance(web, dict):
+    for key, route in web.items():
+        if key_port(key, default_port=443) == https_port:
+            routes.append(route)
+
+if routes:
+    print("luna" if all(is_luna_route(route) for route in routes) else "conflict")
+    raise SystemExit(0)
+
+if isinstance(tcp, dict) and any(key_port(key) == https_port for key in tcp):
+    print("conflict")
+    raise SystemExit(0)
+
+print("free")
+' "$https_port" "$pwa_local_port" "$pwa_relay_port" 2>/dev/null
+)
+
+pwa_health_check() {
+    "$python_bin" - "$pwa_local_port" <<'PY'
+import json
+import sys
+import time
+from urllib.request import urlopen
+
+port = int(sys.argv[1])
+for _ in range(20):
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.5) as response:
+            health = json.load(response)
+            if response.status == 200 and health == {"ok": True, "port": port}:
+                raise SystemExit(0)
+    except Exception:
+        pass
+    time.sleep(0.25)
+raise SystemExit(1)
+PY
+}
+
+pwa_host_health_check() {
+    "$python_bin" - "$pwa_local_port" "$pwa_relay_port" "$1" <<'PY'
+import json
+import sys
+from urllib.request import Request, urlopen
+
+local_port = int(sys.argv[1])
+relay_port = int(sys.argv[2])
+https_port = int(sys.argv[3])
+host = "luna-probe.ts.net" if https_port == 443 else f"luna-probe.ts.net:{https_port}"
+request = Request(
+    f"http://127.0.0.1:{relay_port}/api/health",
+    headers={"Host": host},
+)
+try:
+    with urlopen(request, timeout=0.5) as response:
+        health = json.load(response)
+        if response.status == 200 and health == {"ok": True, "port": local_port}:
+            raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
+PY
+}
+
+require_pwa_port_support() {
+    if pwa_host_health_check "$1"; then
+        return 0
+    fi
+    echo "luna: Das lokale PWA-Relay akzeptiert HTTPS-Port $1 nicht; keine neue Route wurde angelegt." >&2
+    return 1
+}
+
+enable_pwa() {
+    start_server
+    if ! pwa_health_check; then
+        echo "luna: lokale PWA antwortet nicht auf 127.0.0.1:$pwa_local_port; laufende Luna-Instanz bitte erst bei passender Gelegenheit neu starten." >&2
+        return 1
+    fi
+    if ! start_pwa_relay; then
+        return 1
+    fi
+
+    unsupported_ports=""
+    for https_port in $tailscale_https_ports; do
+        marker=$(pwa_marker_path "$https_port")
+        state=$(pwa_serve_state "$https_port") || state=unknown
+        case "$state" in
+            luna)
+                if [ -e "$marker" ]; then
+                    if [ ! -d "$marker" ]; then
+                        echo "luna: Luna-Markierung für Port $https_port ist ungültig; die Route blieb unverändert." >&2
+                        return 1
+                    fi
+                    require_pwa_port_support "$https_port" || return 1
+                    echo "Luna-PWA ist bereits auf Tailscale-HTTPS-Port $https_port eingerichtet."
+                    return 0
+                fi
+                require_pwa_port_support "$https_port" || return 1
+                echo "Luna-PWA ist bereits auf Tailscale-HTTPS-Port $https_port erreichbar; die vorhandene Route blieb unverändert."
+                return 0
+                ;;
+            conflict)
+                if [ -e "$marker" ]; then
+                    if [ ! -d "$marker" ] || ! rmdir "$marker"; then
+                        echo "luna: Die markierte Route auf Port $https_port wurde geändert; Route und Markierung blieben unverändert." >&2
+                        return 1
+                    fi
+                    echo "luna: Veraltete Luna-Markierung auf Port $https_port bereinigt; die andere Route blieb unverändert." >&2
+                fi
+                ;;
+            free)
+                if ! pwa_host_health_check "$https_port"; then
+                    unsupported_ports="${unsupported_ports}${unsupported_ports:+ }$https_port"
+                    continue
+                fi
+                if [ -e "$marker" ]; then
+                    if [ ! -d "$marker" ] || ! rmdir "$marker"; then
+                        echo "luna: Luna-Markierung für Port $https_port konnte nicht sicher bereinigt werden." >&2
+                        return 1
+                    fi
+                fi
+                mkdir -p "$(dirname -- "$marker")"
+                if ! mkdir "$marker" 2>/dev/null; then
+                    echo "luna: Luna-Markierung für Port $https_port ist bereits in Benutzung." >&2
+                    return 1
+                fi
+                if "$tailscale_bin" serve --bg --https="$https_port" "http://127.0.0.1:$pwa_relay_port" >/dev/null 2>&1; then
+                    echo "Luna-PWA ist im Tailscale-Netz auf HTTPS-Port $https_port erreichbar."
+                    return 0
+                fi
+                state=$(pwa_serve_state "$https_port") || state=unknown
+                case "$state" in
+                    luna)
+                        echo "Luna-PWA ist im Tailscale-Netz auf HTTPS-Port $https_port erreichbar."
+                        return 0
+                        ;;
+                    conflict)
+                        if ! rmdir "$marker"; then
+                            echo "luna: Port $https_port ist belegt und seine Luna-Markierung blieb erhalten." >&2
+                            return 1
+                        fi
+                        ;;
+                    free)
+                        rmdir "$marker" 2>/dev/null || true
+                        echo "luna: Tailscale konnte die Route auf Port $https_port nicht einrichten; keine Route wurde übernommen." >&2
+                        return 1
+                        ;;
+                    *)
+                        echo "luna: Ergebnis für Port $https_port ist unklar; die Luna-Markierung blieb zur sicheren Prüfung erhalten." >&2
+                        return 1
+                        ;;
+                esac
+                ;;
+            *)
+                echo "luna: Tailscale-Serve-Status konnte für Port $https_port nicht sicher geprüft werden; keine Route geändert." >&2
+                return 1
+                ;;
+        esac
+    done
+
+    if [ -n "$unsupported_ports" ]; then
+        echo "luna: Die laufende Monitorinstanz akzeptiert keinen freien HTTPS-Port (${unsupported_ports}); keine Route wurde angelegt. Luna nach einem sicheren Neustart neu starten und 'luna pwa on' erneut ausführen." >&2
+    else
+        echo "luna: Tailscale-HTTPS-Ports 38444, 443, 10000 und 8443 sind belegt; keine Route geändert." >&2
+    fi
+    return 1
+}
+
+disable_pwa() {
+    found_marker=0
+    failed=0
+    for https_port in $tailscale_https_ports; do
+        marker=$(pwa_marker_path "$https_port")
+        [ -d "$marker" ] || continue
+        found_marker=1
+
+        state=$(pwa_serve_state "$https_port") || state=unknown
+        case "$state" in
+            free)
+                if rmdir "$marker"; then
+                    echo "Luna-PWA-Route auf Port $https_port war bereits deaktiviert."
+                else
+                    echo "luna: Luna-Markierung für Port $https_port konnte nicht entfernt werden." >&2
+                    failed=1
+                fi
+                ;;
+            luna)
+                if "$tailscale_bin" serve --https="$https_port" off >/dev/null 2>&1; then
+                    if rmdir "$marker"; then
+                        echo "Luna-PWA-Route auf Tailscale-HTTPS-Port $https_port entfernt."
+                    else
+                        echo "luna: Route auf Port $https_port entfernt, aber die Luna-Markierung blieb erhalten." >&2
+                        failed=1
+                    fi
+                else
+                    echo "luna: Route auf Port $https_port konnte nicht entfernt werden; die Markierung blieb erhalten." >&2
+                    failed=1
+                fi
+                ;;
+            conflict)
+                echo "luna: Port $https_port zeigt inzwischen auf eine andere Route; sie blieb unverändert." >&2
+                failed=1
+                ;;
+            *)
+                echo "luna: Tailscale-Serve-Status konnte für Port $https_port nicht sicher geprüft werden; Route und Markierung blieben unverändert." >&2
+                failed=1
+                ;;
+        esac
+    done
+
+    relay_marker=$(pwa_marker_path 38444)
+    if "$systemctl_bin" --user is-active --quiet "$pwa_relay_unit" && [ ! -d "$relay_marker" ]; then
+        relay_state=$(pwa_serve_state 38444) || relay_state=unknown
+        if [ "$relay_state" = "free" ] || [ "$relay_state" = "conflict" ]; then
+            stop_pwa_relay || failed=1
+        fi
+    fi
+
+    if [ "$found_marker" -eq 0 ]; then
+        echo "Luna verwaltet keine Tailscale-PWA-Route."
+        return "$failed"
+    fi
+    return "$failed"
+}
+
+cleanup_pwa_for_server_shutdown() {
+    has_marker=0
+    for https_port in $tailscale_https_ports; do
+        if [ -d "$(pwa_marker_path "$https_port")" ]; then
+            has_marker=1
+            break
+        fi
+    done
+    if systemctl_bin=$(command -v systemctl) \
+        && "$systemctl_bin" --user is-active --quiet "$pwa_relay_unit"; then
+        has_marker=1
+    fi
+    if [ "$has_marker" -eq 0 ]; then
+        return 0
+    fi
+    if tailscale_bin=$(command -v tailscale) \
+        && python_bin=$(command -v python3) \
+        && systemctl_bin=$(command -v systemctl); then
+        disable_pwa || echo "luna: PWA-Aufräumen war unvollständig; vorhandene Markierungen bitte prüfen." >&2
+    elif systemctl_bin=$(command -v systemctl); then
+        "$systemctl_bin" --user stop "$pwa_relay_unit" >/dev/null 2>&1 || true
+    fi
+}
+
+case "$command_name:$command_arg" in
+    pwa:on)
+        enable_pwa
+        ;;
+    pwa:off)
+        disable_pwa
+        ;;
+    on:)
+        start_server
+        echo "Luna-Monitorserver laeuft. Mit 'luna' wird die Ansicht geoeffnet."
+        ;;
+    off:)
+        cleanup_pwa_for_server_shutdown
+        if session_exists; then
+            tmux_command send-keys -t "$tmux_session" C-c
+            attempts=0
+            while session_exists && [ "$attempts" -lt 30 ]; do
+                sleep 0.1
+                attempts=$((attempts + 1))
+            done
+            if session_exists; then
+                tmux_command kill-session -t "$tmux_session"
+            fi
+            echo "Luna-Monitorserver beendet."
+        else
+            echo "Luna-Monitorserver laeuft nicht."
+        fi
+        ;;
+    :)
+        if [ ! -t 0 ] || [ ! -t 1 ]; then
+            echo "luna: benoetigt ein interaktives Terminal; fuer den Hintergrund luna on verwenden." >&2
+            exit 1
+        fi
+        start_server
+        exec "$tmux_bin" -f /dev/null -L "$tmux_socket" attach-session -t "$tmux_session"
+        ;;
+esac

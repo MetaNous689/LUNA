@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Luna
+Comment=Terminal system monitor with GPU and Claude Code / Codex status
+Exec=luna
+TryExec=luna
+Icon=luna
+Terminal=true
+Categories=System;Monitor;
+Keywords=system;monitor;gpu;claude;codex;terminal;
+StartupNotify=false

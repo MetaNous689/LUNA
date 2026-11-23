@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#121313">
+    <meta name="color-scheme" content="dark">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Luna">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="/manifest.webmanifest?v=icon-20261022-ringed-planet-cropped">
+    <link rel="icon" href="/icon.png?v=icon-20261022-ringed-planet-cropped" type="image/png">
+    <link rel="apple-touch-icon" href="/icon-192.png?v=icon-20261022-ringed-planet-cropped">
+    <link rel="stylesheet" href="/assets/app.css?v=luna-limits-20261123">
+    <title>Luna · Monitor</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Luna Monitor">
+          <img src="/icon.png?v=icon-20261022-ringed-planet-cropped" width="36" height="36" alt="">
+          <span class="brand-copy"><strong>Luna</strong><span>Monitor</span></span>
+        </a>
+        <div class="connection" id="connection" data-state="loading" role="status" aria-live="polite">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span id="connection-label">Verbinde</span>
+        </div>
+        <button class="refresh" id="refresh" type="button" aria-label="Messwerte aktualisieren" title="Aktualisieren">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.3 8A8 8 0 1 0 20 14M19.3 3.5V8h-4.5"></path></svg>
+        </button>
+      </header>
+
+      <main>
+        <section class="overview" aria-labelledby="overview-title">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">LIVE-RESSOURCEN</p>
+              <h1 id="overview-title">Übersicht</h1>
+            </div>
+            <p class="updated" id="updated">Warte auf Messwerte</p>
+          </div>
+
+          <div class="metric-grid" aria-label="Ressourcen">
+            <div class="metric-group">
+              <article class="metric" aria-labelledby="cpu-label">
+                <div class="metric-head"><h2 id="cpu-label">CPU</h2><span class="metric-mark">frei</span></div>
+                <p class="metric-value" id="cpu-value">—</p>
+                <p class="metric-detail" id="cpu-detail">Noch keine Messung</p>
+                <svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="cpu-spark"></path></svg>
+              </article>
+              <article class="metric" aria-labelledby="ram-label">
+                <div class="metric-head"><h2 id="ram-label">RAM</h2><span class="metric-mark">frei</span></div>
+                <p class="metric-value" id="ram-value">—</p>
+                <p class="metric-detail" id="ram-detail">Noch keine Messung</p>
+                <dl class="memory-details">
+                  <div><dt>Swap</dt><dd id="ram-swap">—</dd></div>
+                  <div>
+                    <dt><abbr title="Speicherdruck: Anteil der Wartezeit auf Speicher, Mittel über 10 Sekunden">PSI</abbr> · 10 s</dt>
+                    <dd class="memory-pressure">
+                      <span title="Mindestens eine Aufgabe wartet auf Speicher">some <span id="ram-psi-some">—</span></span>
+                      <span title="Alle aktiven Aufgaben warten auf Speicher">full <span id="ram-psi-full">—</span></span>
+                    </dd>
+                  </div>
+                </dl>
+                <svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="ram-spark"></path></svg>
+              </article>
+              <article class="metric" aria-labelledby="gpu-label">
+                <div class="metric-head"><h2 id="gpu-label">GPU</h2><span class="metric-mark">Last</span></div>
+                <p class="metric-value" id="gpu-value">—</p>
+                <p class="metric-detail" id="gpu-detail">Nicht verfügbar</p>
+                <svg class="spark" viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="gpu-spark"></path></svg>
+              </article>
+              <article class="metric" aria-labelledby="vram-label">
+                <div class="metric-head"><h2 id="vram-label">VRAM</h2><span class="metric-mark">frei</span></div>
+                <p class="metric-value" id="vram-value">—</p>
+                <p class="metric-detail" id="vram-detail">Nicht verfügbar</p>
+              </article>
+              <article class="metric" aria-labelledby="disk-label">
+                <div class="metric-head"><h2 id="disk-label">DISK</h2><span class="metric-mark">frei</span></div>
+                <p class="metric-value" id="disk-value">—</p>
+                <p class="metric-detail" id="disk-detail">Noch keine Messung</p>
+              </article>
+            </div>
+            <article class="metric metric-codex" aria-labelledby="codex-label">
+              <div class="metric-head"><h2 id="codex-label">CODEX</h2><span class="metric-mark">Woche</span></div>
+              <p class="metric-value"><span id="codex-value">—</span><span class="quota-caption"> frei</span></p>
+              <meter class="quota-meter" id="codex-meter" min="0" max="100" value="0" aria-label="Verbleibendes Codex-Wochenbudget in Prozent" hidden></meter>
+              <p class="metric-detail" id="codex-detail">Limit wird geladen</p>
+            </article>
+            <article class="metric metric-claude" aria-labelledby="claude-label">
+              <div class="metric-head"><h2 id="claude-label">CLAUDE</h2><span class="metric-mark">Woche</span></div>
+              <p class="metric-value"><span id="claude-value">—</span><span class="quota-caption"> frei</span></p>
+              <meter class="quota-meter" id="claude-meter" min="0" max="100" value="0" aria-label="Verbleibendes Claude-Wochenbudget in Prozent" hidden></meter>
+              <p class="metric-detail" id="claude-detail">Limit wird geladen</p>
+            </article>
+          </div>
+        </section>
+
+        <div class="lower-grid">
+          <section class="panel trends" aria-labelledby="trends-title">
+            <header class="panel-head">
+              <h2 id="trends-title">Verlauf</h2>
+              <span class="panel-note">letzte Minute</span>
+            </header>
+            <div class="trend-content">
+              <div class="trend-list">
+                <div class="trend-row"><span>CPU</span><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="cpu-trend"></path></svg><span id="cpu-now">—</span></div>
+                <div class="trend-row"><span>RAM</span><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="ram-trend"></path></svg><span id="ram-now">—</span></div>
+                <div class="trend-row"><span>GPU</span><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="gpu-trend"></path></svg><span id="gpu-now">—</span></div>
+                <div class="trend-row"><span>Netz</span><svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path id="network-trend"></path></svg><span id="network-now">—</span></div>
+              </div>
+              <p class="network-detail" id="network-detail">Netzwerkdurchsatz nicht verfügbar</p>
+            </div>
+          </section>
+
+          <section class="panel agents" aria-labelledby="agents-title">
+            <header class="panel-head">
+              <h2 id="agents-title">Agenten</h2>
+              <span class="panel-note" id="agents-note">Wird geladen</span>
+            </header>
+            <ul class="status-list" id="agent-list" aria-label="Agenten">
+              <li class="list-empty">Agentenstatus wird geladen</li>
+            </ul>
+          </section>
+
+          <section class="panel servers" aria-labelledby="servers-title">
+            <header class="panel-head">
+              <h2 id="servers-title">Server</h2>
+              <span class="panel-note" id="servers-note">Wird geladen</span>
+            </header>
+            <ul class="status-list" id="server-list" aria-label="Lokale Server">
+              <li class="list-empty">Serverliste wird geladen</li>
+            </ul>
+          </section>
+        </div>
+      </main>
+
+      <footer class="footer">
+        <span>Nur Messwerte · schreibgeschützt</span>
+        <p class="install-help" id="install-help" role="status" hidden></p>
+        <button id="install" type="button" hidden>Als PWA installieren</button>
+      </footer>
+    </div>
+    <script src="/assets/app.js?v=luna-limits-20261123" defer></script>
+  </body>
+</html>

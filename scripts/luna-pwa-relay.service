@@ -1,0 +1,16 @@
+[Unit]
+Description=Luna Tailscale PWA read-only relay
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/libexec/luna/luna-pwa-relay.py --listen 127.0.0.1 --port 4783 --upstream 127.0.0.1 --upstream-port 4782
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=64M
+TasksMax=16
