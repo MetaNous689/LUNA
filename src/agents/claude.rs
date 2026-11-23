@@ -26,6 +26,7 @@ use serde::Deserialize;
 
 use serde_json::Value;
 
+use super::processes::process_start;
 use super::{on_path, AgentProvider, AgentState, RawAgent, SourceResult};
 
 /// The size limit Claude Code itself applies to a session file.
@@ -66,15 +67,6 @@ fn label_of(name: Option<&str>, cwd: Option<&str>) -> String {
         .map(str::to_owned)
         .or_else(|| cwd.map(super::folder_name))
         .unwrap_or_else(|| "claude".into())
-}
-
-/// Start time of a process in clock ticks since boot, `/proc/<pid>/stat` field
-/// 22. Claude Code records it as `procStart`, which tells a live session from a
-/// recycled process id.
-fn process_start(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_name = stat.rsplit_once(')')?.1;
-    after_name.split_whitespace().nth(19).map(str::to_owned)
 }
 
 /// Whether a path is a terminal device, which is what an interactive session

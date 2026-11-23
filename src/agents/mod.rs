@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 mod claude;
 mod codex;
+mod processes;
 mod websocket;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);

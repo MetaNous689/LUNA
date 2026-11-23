@@ -5,6 +5,7 @@
 //! connects like any other client, lists the loaded threads and reads each
 //! thread's status. Only metadata is requested: no turns, no prompts.
 
+use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use super::processes::{self, process_start};
 use super::websocket::WebSocket;
 use super::{AgentProvider, AgentState, RawAgent, SourceResult};
 
@@ -31,6 +33,9 @@ pub fn socket_path() -> Option<PathBuf> {
 pub struct CodexLink {
     socket: WebSocket<UnixStream>,
     next_id: u64,
+    path: PathBuf,
+    /// The app-server process behind the socket, with its start time.
+    daemon: Option<(u32, String)>,
 }
 
 pub enum Connect {
@@ -54,7 +59,12 @@ impl CodexLink {
             .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
             .map_err(|_| Connect::Failed)?;
         let socket = WebSocket::handshake(stream).map_err(|_| Connect::Failed)?;
-        let mut link = Self { socket, next_id: 1 };
+        let mut link = Self {
+            socket,
+            next_id: 1,
+            path: path.to_path_buf(),
+            daemon: None,
+        };
         link.call(
             "initialize",
             json!({"clientInfo": {
@@ -116,17 +126,46 @@ impl CodexLink {
             }
         }
         ids.truncate(MAX_THREADS);
-        let mut agents = Vec::new();
+        let mut found: Vec<(RawAgent, Option<String>)> = Vec::new();
         for id in ids {
             let result = self.call(
                 "thread/read",
                 json!({"threadId": id, "includeTurns": false}),
             )?;
-            if let Some(agent) = parse_thread(result.get("thread").ok_or(())?) {
-                agents.push(agent);
+            let thread = result.get("thread").ok_or(())?;
+            if let Some(agent) = parse_thread(thread) {
+                let dir = thread
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .filter(|dir| !dir.trim().is_empty())
+                    .map(processes::normalize);
+                found.push((agent, dir));
             }
         }
-        Ok(agents)
+        if found
+            .iter()
+            .any(|(agent, dir)| agent.state == AgentState::Idle && dir.is_some())
+        {
+            if let Some(daemon) = self.daemon_pid() {
+                mark_background_work(&mut found, &processes::child_dirs(daemon, "bwrap"));
+            }
+        }
+        Ok(found.into_iter().map(|(agent, _)| agent).collect())
+    }
+
+    /// The app-server process that listens on the control socket.
+    fn daemon_pid(&mut self) -> Option<u32> {
+        if let Some((pid, start)) = &self.daemon {
+            if process_start(*pid).as_deref() == Some(start) {
+                return Some(*pid);
+            }
+        }
+        let socket = fs::canonicalize(&self.path).ok()?;
+        let table = fs::read_to_string("/proc/net/unix").ok()?;
+        let inode = processes::socket_inode(&table, socket.to_str()?)?;
+        let pid = processes::listener_pid(inode)?;
+        self.daemon = Some((pid, process_start(pid)?));
+        Some(pid)
     }
 }
 
@@ -183,6 +222,32 @@ fn state_of(status: &Value) -> AgentState {
         }
         Some("idle") => AgentState::Idle,
         _ => AgentState::Unknown,
+    }
+}
+
+/// Codex calls a thread idle once its turn ended, even while a command it
+/// started in the background still runs. Such a command runs in a `bwrap`
+/// sandbox directly under the app-server, in the thread's working folder.
+///
+/// An idle thread is shown as working only when such a sandbox runs in its
+/// folder and no other loaded thread shares that folder, so the command cannot
+/// belong to someone else. Otherwise the thread stays idle: Luna would rather
+/// miss background work than claim it falsely.
+fn mark_background_work(agents: &mut [(RawAgent, Option<String>)], busy_dirs: &[String]) {
+    for index in 0..agents.len() {
+        let Some(dir) = agents[index].1.clone() else {
+            continue;
+        };
+        if agents[index].0.state != AgentState::Idle || !busy_dirs.contains(&dir) {
+            continue;
+        }
+        let sharing = agents
+            .iter()
+            .filter(|(_, other)| other.as_deref() == Some(dir.as_str()))
+            .count();
+        if sharing == 1 {
+            agents[index].0.state = AgentState::Working;
+        }
     }
 }
 
@@ -249,6 +314,41 @@ mod tests {
             state_of(&json!({"type": "systemError"})),
             AgentState::Unknown
         );
+    }
+
+    #[test]
+    fn an_idle_thread_with_a_sandboxed_command_in_its_folder_is_working() {
+        let agent = |key: &str, state| RawAgent {
+            key: key.into(),
+            provider: AgentProvider::Codex,
+            label: key.into(),
+            state,
+        };
+        let dir = |text: &str| Some(text.to_owned());
+        let busy = vec!["/work/app".to_owned()];
+
+        let mut alone = vec![(agent("a", AgentState::Idle), dir("/work/app"))];
+        mark_background_work(&mut alone, &busy);
+        assert_eq!(alone[0].0.state, AgentState::Working);
+
+        // Another thread in the same folder could own the command: stay idle.
+        let mut shared = vec![
+            (agent("a", AgentState::Idle), dir("/work/app")),
+            (agent("b", AgentState::Working), dir("/work/app")),
+        ];
+        mark_background_work(&mut shared, &busy);
+        assert_eq!(shared[0].0.state, AgentState::Idle);
+
+        // A different folder, an unknown folder, or no command at all.
+        let mut other = vec![
+            (agent("a", AgentState::Idle), dir("/work/other")),
+            (agent("b", AgentState::Idle), None),
+        ];
+        mark_background_work(&mut other, &busy);
+        assert!(other.iter().all(|(a, _)| a.state == AgentState::Idle));
+        let mut none = vec![(agent("a", AgentState::Idle), dir("/work/app"))];
+        mark_background_work(&mut none, &[]);
+        assert_eq!(none[0].0.state, AgentState::Idle);
     }
 
     #[test]

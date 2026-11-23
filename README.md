@@ -76,6 +76,19 @@ Luna shows agents that are in use, not everything a backend remembers:
 - a background agent is shown only while its worker is running. Agents the CLI
   still lists as blocked or failed, but that nothing runs, are not.
 
+An agent with something still running in the background is not idle:
+
+- **Claude Code** reports `shell` while a background command or monitor runs, and
+  `busy` while a sub-agent works. Both are shown as WORKING.
+- **Codex** calls a thread idle as soon as its turn ends, even while a command it
+  started keeps running, and offers no way to ask. Luna therefore looks at the
+  process tree: a sandbox helper (`bwrap`) directly under the Codex app-server,
+  running in a thread's folder, counts as work of that thread, but only when no
+  other loaded thread shares that folder. Commands outside a sandbox, in another
+  folder than the thread's, or in a folder shared by several threads are not
+  detected, and the thread shows IDLE. Luna would rather miss background work
+  than claim it falsely.
+
 `DONE` is shown for five minutes after an agent that was working turns idle.
 Backends only report what an agent does right now, so Luna remembers the
 transition. A status Luna does not know is shown without a label.
@@ -112,8 +125,9 @@ exposed unless you run `luna pwa on`.
 
 ## Privacy
 
-Luna does not scan process arguments, environments, IP addresses, prompts or
-histories. Local servers are reduced to name, port and process id. Stopping one
+Luna does not read process arguments, environments, IP addresses, prompts or
+histories. From the process tree it reads only the parent, name and working
+folder of the sandbox helpers directly under the Codex app-server. Local servers are reduced to name, port and process id. Stopping one
 asks for confirmation and only affects your own user services and processes.
 
 ## Development
