@@ -14,29 +14,53 @@ state_root=${XDG_STATE_HOME:-${HOME:?HOME must be set}/.local/state}
 pwa_relay_script="$monitor_dir/luna-pwa-relay.py"
 pwa_relay_unit=luna-pwa-relay.service
 
-# The isolated socket is independent of a tmux session that launched Luna.
-unset TMUX
-
 usage() {
     cat <<'HELP'
 luna — lokaler Systemmonitor
 
 Aufruf:
-  luna       Monitor starten oder an die laufende Luna-Ansicht anhaengen
+  luna       LUNA Info starten oder an die laufende Info-Ansicht anhaengen
+  luna info  LUNA Info öffnen (Systemwerte und Agentenstatus)
+  luna ac    LUNA AC öffnen (SFPAC-Terminals und Agentensteuerung)
   luna on    Monitorserver im Hintergrund starten
   luna off   Luna-Monitorserver beenden
   luna pwa on   PWA sicher über einen freien Tailscale-HTTPS-Port bereitstellen
   luna pwa off  Nur die von Luna gesetzte Tailscale-Route entfernen
   luna --help
 
-Alle Aufrufe verwenden dieselbe isolierte tmux-Sitzung. q oder Esc loest die
-Ansicht; luna off beendet den Monitorserver. r aktualisiert die Messwerte.
+LUNA Info nutzt eine isolierte tmux-Sitzung; LUNA AC startet SFPAC direkt.
+q oder Esc loest Info; luna off beendet nur den Info-Monitorserver.
+In Info aktualisiert r die Messwerte.
 Pfeil hoch/runter waehlt einen Server, x fragt nach dem Beenden.
 HELP
 }
 
 command_name=${1-}
 command_arg=${2-}
+
+case "$command_name" in
+    ac)
+        shift
+        if ! sfpac_bin=$(command -v sfpac); then
+            echo "luna: LUNA AC benötigt den installierten SFPAC-Befehl 'sfpac'." >&2
+            exit 127
+        fi
+        exec "$sfpac_bin" "$@"
+        ;;
+    info)
+        shift
+        if [ "$#" -ne 0 ]; then
+            usage >&2
+            exit 64
+        fi
+        command_name=
+        command_arg=
+        ;;
+esac
+
+# Only LUNA Info uses its private tmux server. Preserve the caller's tmux
+# environment when `luna ac` delegates to SFPAC.
+unset TMUX
 
 case "$command_name" in
     --help|-h|help)
@@ -500,7 +524,7 @@ case "$command_name:$command_arg" in
         ;;
     on:)
         start_server
-        echo "Luna-Monitorserver laeuft. Mit 'luna' wird die Ansicht geoeffnet."
+        echo "LUNA Info laeuft. Mit 'luna info' wird die Ansicht geoeffnet."
         ;;
     off:)
         cleanup_pwa_for_server_shutdown

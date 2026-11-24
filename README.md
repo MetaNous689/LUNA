@@ -1,13 +1,15 @@
 # Luna
 
-A premium terminal system monitor for Linux that also shows what your coding
-agents are doing. One full-screen view on a pure black canvas: CPU with per-core
+A premium terminal system monitor and agent workspace for Linux. `luna info`
+shows the live system and agent overview; `luna ac` opens the SFPAC terminal
+workspace. One full-screen Info view on a pure black canvas: CPU with per-core
 bars, RAM with swap and memory pressure (PSI), GPU and VRAM, network, every
 volume, local servers you can stop, the weekly usage limits of Claude Code and
 Codex, and the live status of every Claude Code and Codex agent.
 
-Luna stands alone. It needs no other tool, and it reads Claude Code and Codex
-from their own backends.
+LUNA Info runs on its own and reads Claude Code and Codex from their own
+backends. LUNA AC uses the installed SFPAC runtime for persistent terminals and
+agent control; SFPAC remains optional if only the Info view is needed.
 
 ```
 ╭ CPU ───────────────────────╮╭ RAM ───────────────────╮╭ GPU ───────────────────╮
@@ -46,12 +48,18 @@ The installer puts `luna` in `~/.local/bin` and the monitor in
 `~/.local/libexec/luna`. Make sure `~/.local/bin` is on your `PATH`.
 
 ```sh
-luna          # open the monitor, starting it if needed
-luna on       # start it in the background
-luna off      # stop it
+luna          # open LUNA Info (same as `luna info`)
+luna info     # open the live system and agent overview
+luna ac       # open SFPAC as LUNA AC
+luna on       # start the Info monitor in the background
+luna off      # stop only the Info monitor
 q or Esc      # leave the view, the monitor keeps running
 r             # refresh, ↑/↓ select a server, x stop it (asks first)
 ```
+
+`luna ac` delegates to the installed `sfpac` command and preserves SFPAC's
+existing session runtime. LUNA does not stop or recreate AC terminals when its
+Info monitor is stopped.
 
 To run without tmux: `./target/release/luna-monitor --no-pwa`.
 
@@ -60,6 +68,13 @@ To run without tmux: `./target/release/luna-monitor --no-pwa`.
 Luna lists every running agent with its backend, name and one of four states:
 `WORKING`, `IDLE`, `BLOCKED`, `DONE`. Status comes from the agents' own backends
 and is never guessed.
+
+When the SFPAC runtime is available, matching Codex and interactive Claude
+entries follow LUNA AC's project-group order, then each group's persisted slot
+order. Status still comes from the native Codex and Claude backends. LUNA uses
+only the SFPAC thread IDs, Claude process IDs and group metadata needed to apply
+that order; unmatched backend entries retain a stable provider/name order.
+Without SFPAC, the existing stable backend order is used.
 
 | Backend | Source | Mapping |
 | --- | --- | --- |

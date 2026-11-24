@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 mod claude;
 mod codex;
 mod processes;
+mod sfpac;
 mod websocket;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -197,6 +198,7 @@ struct Poller {
     background: Vec<RawAgent>,
     background_due: Instant,
     tracker: DoneTracker,
+    ac_order: HashMap<String, usize>,
 }
 
 impl Poller {
@@ -206,10 +208,14 @@ impl Poller {
             background: Vec::new(),
             background_due: Instant::now(),
             tracker: DoneTracker::default(),
+            ac_order: HashMap::new(),
         }
     }
 
     fn poll(&mut self, now: Instant) -> Observation {
+        if let Some(order) = sfpac::current_order() {
+            self.ac_order = order;
+        }
         let claude_dir = claude::config_dir();
         let claude = claude_dir
             .as_deref()
@@ -250,12 +256,14 @@ impl Poller {
     fn finish(&mut self, now: Instant, raw: Vec<RawAgent>) -> Vec<AgentEntry> {
         self.tracker
             .retain(&raw.iter().map(|agent| agent.key.as_str()).collect());
-        let mut agents: Vec<(String, AgentEntry)> = raw
+        let mut agents: Vec<(String, Option<usize>, AgentEntry)> = raw
             .into_iter()
             .map(|agent| {
                 let state = self.tracker.apply(now, &agent.key, agent.state);
+                let ac_rank = self.ac_order.get(&agent.key).copied();
                 (
                     agent.key,
+                    ac_rank,
                     AgentEntry {
                         label: agent.label,
                         state,
@@ -264,15 +272,26 @@ impl Poller {
                 )
             })
             .collect();
-        // A stable order keeps rows from jumping when a status changes.
-        agents.sort_by(|(left_key, left), (right_key, right)| {
-            (left.provider, left.label.to_lowercase(), left_key).cmp(&(
-                right.provider,
-                right.label.to_lowercase(),
-                right_key,
-            ))
-        });
-        agents.into_iter().map(|(_, entry)| entry).collect()
+        // SFPAC ranks use its group/slot order; backend-only rows stay stable.
+        agents.sort_by(
+            |(left_key, left_rank, left), (right_key, right_rank, right)| {
+                (
+                    left_rank.is_none(),
+                    left_rank.unwrap_or(usize::MAX),
+                    left.provider,
+                    left.label.to_lowercase(),
+                    left_key,
+                )
+                    .cmp(&(
+                        right_rank.is_none(),
+                        right_rank.unwrap_or(usize::MAX),
+                        right.provider,
+                        right.label.to_lowercase(),
+                        right_key,
+                    ))
+            },
+        );
+        agents.into_iter().map(|(_, _, entry)| entry).collect()
     }
 }
 
